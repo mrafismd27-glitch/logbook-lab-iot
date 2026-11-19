@@ -87,4 +87,4 @@ flutter run
 ## Tim Pengembang
 
 - **Azalia Natasya** — Perancangan Antarmuka (Flutter UI/UX), Struktur Proyek, & Dokumentasi
-- **Opi** — Pengembangan & Deploy Smart Contract (`Solidity`), Integrasi `web3dart`, & Pengujian Transaksi Sepolia
+- **Muhammad Rafi Nurramadhan** — Pengembangan & Deploy Smart Contract (`Solidity`), Integrasi `web3dart`, & Pengujian Transaksi Sepolia
