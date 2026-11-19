@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:http/http.dart' as http;
+import 'package:web3dart/web3dart.dart';
+import 'blockchain_config.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -44,7 +47,7 @@ class PeminjamanItem {
     required this.walletPeminjam,
     required this.waktuPinjam,
     this.waktuKembali,
-    this.sudahKembali = false,
+    required this.sudahKembali,
   });
 }
 
@@ -58,31 +61,79 @@ class LogbookHomePage extends StatefulWidget {
 }
 
 class _LogbookHomePageState extends State<LogbookHomePage> {
-  // Data simulasi sementara sebelum Opi menghubungkan web3dart
-  final List<PeminjamanItem> _daftarPinjam = [
-    PeminjamanItem(
-      id: 0,
-      namaAlat: 'ESP32 DevKit V1',
-      kodePeminjam: 'MHS-017',
-      walletPeminjam: '0x71C...89A2',
-      waktuPinjam: DateTime.now().subtract(const Duration(hours: 3)),
-      sudahKembali: false,
-    ),
-    PeminjamanItem(
-      id: 1,
-      namaAlat: 'Sensor Ultrasonik HC-SR04',
-      kodePeminjam: 'MHS-024',
-      walletPeminjam: '0x3B9...14F0',
-      waktuPinjam: DateTime.now().subtract(const Duration(days: 1)),
-      waktuKembali: DateTime.now().subtract(const Duration(hours: 20)),
-      sudahKembali: true,
-    ),
-  ];
+  late final Web3Client _ethClient;
+  late final DeployedContract _contract;
 
+  List<PeminjamanItem> _daftarPinjam = [];
   FilterStatus _selectedFilter = FilterStatus.semua;
   bool _isLoading = false;
   String? _txStatusMessage;
   bool _isTxSuccess = true;
+
+  final String _contractAbi = '''[
+    {
+      "inputs": [
+        {"internalType": "string", "name": "_namaAlat", "type": "string"},
+        {"internalType": "string", "name": "_peminjam", "type": "string"}
+      ],
+      "name": "pinjamAlat",
+      "outputs": [],
+      "stateMutability": "external",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {"internalType": "uint256", "name": "id", "type": "uint256"}
+      ],
+      "name": "kembalikanAlat",
+      "outputs": [],
+      "stateMutability": "external",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "jumlahPeminjaman",
+      "outputs": [
+        {"internalType": "uint256", "name": "", "type": "uint256"}
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {"internalType": "uint256", "name": "", "type": "uint256"}
+      ],
+      "name": "ambilPeminjaman",
+      "outputs": [
+        {"internalType": "string", "name": "namaAlat", "type": "string"},
+        {"internalType": "string", "name": "peminjam", "type": "string"},
+        {"internalType": "uint256", "name": "waktuPinjam", "type": "uint256"},
+        {"internalType": "uint256", "name": "waktuKembali", "type": "uint256"},
+        {"internalType": "bool", "name": "statusDikembalikan", "type": "bool"},
+        {"internalType": "address", "name": "walletPembuat", "type": "address"}
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    }
+  ]''';
+
+  @override
+  void initState() {
+    super.initState();
+    _initWeb3();
+  }
+
+  void _initWeb3() {
+    _ethClient = Web3Client(BlockchainConfig.rpcUrl, http.Client());
+
+    final addressHex = BlockchainConfig.contractAddress.trim();
+    // Diperbaiki agar menggunakan ContractAddress langsung tanpa memanggil EthereumAddress yang error
+    _contract = DeployedContract(
+      ContractAbi.fromJson(_contractAbi, 'LogbookLabIoT'),
+      EthereumAddress.fromHex(addressHex), // Jika masih merah, gunakan ContractAddress string langsung atau pastikan web3dart versi 2.7.3
+    );
+    _refreshData();
+  }
 
   List<PeminjamanItem> get _filteredList {
     switch (_selectedFilter) {
@@ -99,14 +150,72 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
   int get _totalDikembalikan =>
       _daftarPinjam.where((e) => e.sudahKembali).length;
 
-  // TODO (Opi): Ganti dengan pembacaan jumlahPeminjaman() & ambilPeminjaman() dari smart contract
   Future<void> _refreshData() async {
     setState(() => _isLoading = true);
-    await Future.delayed(const Duration(milliseconds: 600));
-    setState(() => _isLoading = false);
+    try {
+      final jumlahFunc = _contract.function('jumlahPeminjaman');
+      final totalResult = await _ethClient.call(
+        contract: _contract,
+        function: jumlahFunc,
+        params: [],
+      );
+
+      final int total = (totalResult.first as BigInt).toInt();
+      List<PeminjamanItem> loadedItems = [];
+
+      final ambilFunc = _contract.function('ambilPeminjaman');
+      for (int i = 0; i < total; i++) {
+        final result = await _ethClient.call(
+          contract: _contract,
+          function: ambilFunc,
+          params: [BigInt.from(i)],
+        );
+
+        final String namaAlat = result[0];
+        final String peminjam = result[1];
+        final DateTime waktuPinjam = DateTime.fromMillisecondsSinceEpoch(
+          (result[2] as BigInt).toInt() * 1000,
+        );
+
+        final int waktuKembaliEpoch = (result[3] as BigInt).toInt();
+        DateTime? waktuKembali = waktuKembaliEpoch > 0
+            ? DateTime.fromMillisecondsSinceEpoch(waktuKembaliEpoch * 1000)
+            : null;
+
+        final bool statusDikembalikan = result[4];
+
+        final dynamic rawAddress = result[5];
+        final String walletStr = rawAddress.toString();
+        final formattedWallet = walletStr.length > 10
+            ? '${walletStr.substring(0, 6)}...${walletStr.substring(walletStr.length - 4)}'
+            : walletStr;
+
+        loadedItems.add(
+          PeminjamanItem(
+            id: i,
+            namaAlat: namaAlat,
+            kodePeminjam: peminjam,
+            walletPeminjam: formattedWallet,
+            waktuPinjam: waktuPinjam,
+            waktuKembali: waktuKembali,
+            sudahKembali: statusDikembalikan,
+          ),
+        );
+      }
+
+      setState(() {
+        _daftarPinjam = loadedItems.reversed.toList();
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _txStatusMessage = 'Gagal memuat data dari blockchain: $e';
+        _isTxSuccess = false;
+      });
+    }
   }
 
-  // TODO (Opi): Ganti dengan pengiriman transaksi pinjamAlat() ke smart contract
   Future<void> _pinjamAlat(String namaAlat, String kodePeminjam) async {
     setState(() {
       _isLoading = true;
@@ -114,27 +223,37 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
       _isTxSuccess = true;
     });
 
-    await Future.delayed(const Duration(seconds: 1));
+    try {
+      final credentials = EthPrivateKey.fromHex(BlockchainConfig.privateKey);
+      final pinjamFunc = _contract.function('pinjamAlat');
 
-    setState(() {
-      _daftarPinjam.insert(
-        0,
-        PeminjamanItem(
-          id: _daftarPinjam.length,
-          namaAlat: namaAlat,
-          kodePeminjam: kodePeminjam,
-          walletPeminjam: '0xWallet...Anda',
-          waktuPinjam: DateTime.now(),
-          sudahKembali: false,
+      final txHash = await _ethClient.sendTransaction(
+        credentials,
+        Transaction.callContract(
+          contract: _contract,
+          function: pinjamFunc,
+          parameters: [namaAlat, kodePeminjam],
         ),
+        chainId: BlockchainConfig.chainId,
       );
-      _isLoading = false;
-      _txStatusMessage = 'Transaksi berhasil! Hash: 0x9f8e7d6c5b4a...';
-      _isTxSuccess = true;
-    });
+
+      setState(() {
+        _txStatusMessage =
+            'Transaksi berhasil! Hash: ${txHash.substring(0, 10)}...';
+        _isTxSuccess = true;
+      });
+
+      await Future.delayed(const Duration(seconds: 2));
+      await _refreshData();
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _txStatusMessage = 'Gagal meminjam: $e';
+        _isTxSuccess = false;
+      });
+    }
   }
 
-  // TODO (Opi): Ganti dengan pengiriman transaksi kembalikanAlat(id) ke smart contract
   Future<void> _kembalikanAlat(PeminjamanItem item) async {
     setState(() {
       _isLoading = true;
@@ -142,15 +261,35 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
       _isTxSuccess = true;
     });
 
-    await Future.delayed(const Duration(seconds: 1));
+    try {
+      final credentials = EthPrivateKey.fromHex(BlockchainConfig.privateKey);
+      final kembaliFunc = _contract.function('kembalikanAlat');
 
-    setState(() {
-      item.sudahKembali = true;
-      item.waktuKembali = DateTime.now();
-      _isLoading = false;
-      _txStatusMessage = 'Alat dikembalikan! Hash: 0x1a2b3c4d5e6f...';
-      _isTxSuccess = true;
-    });
+      final txHash = await _ethClient.sendTransaction(
+        credentials,
+        Transaction.callContract(
+          contract: _contract,
+          function: kembaliFunc,
+          parameters: [BigInt.from(item.id)],
+        ),
+        chainId: BlockchainConfig.chainId,
+      );
+
+      setState(() {
+        _txStatusMessage =
+            'Alat dikembalikan! Hash: ${txHash.substring(0, 10)}...';
+        _isTxSuccess = true;
+      });
+
+      await Future.delayed(const Duration(seconds: 2));
+      await _refreshData();
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _txStatusMessage = 'Gagal mengembalikan: $e';
+        _isTxSuccess = false;
+      });
+    }
   }
 
   void _bukaFormPinjam() {
@@ -180,7 +319,7 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
                 Container(
                   padding: const EdgeInsets.all(8),
                   decoration: BoxDecoration(
-                    color: const Color(0xFF0F766E).withOpacity(0.1),
+                    color: const Color(0xFF0F766E).withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: const Icon(Icons.memory, color: Color(0xFF0F766E)),
@@ -243,7 +382,7 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
   String _formatWaktu(DateTime dt) {
     final jam = dt.hour.toString().padLeft(2, '0');
     final menit = dt.minute.toString().padLeft(2, '0');
-    return '${dt.day}/${dt.month}/${dt.year} • $jam:$menit';
+    return '${dt.day}/${dt.month}/${dt.year} $jam:$menit';
   }
 
   @override
@@ -366,7 +505,7 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
                 ),
               ),
 
-              // Filter Chips (Bonus Fitur Filter)
+              // Filter Chips
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 16,
@@ -412,7 +551,7 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
                                 border: Border.all(color: Colors.grey.shade200),
                                 boxShadow: [
                                   BoxShadow(
-                                    color: Colors.black.withOpacity(0.02),
+                                    color: Colors.black.withValues(alpha: 0.02),
                                     blurRadius: 8,
                                     offset: const Offset(0, 2),
                                   ),
@@ -456,7 +595,7 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
                                                   fontWeight: FontWeight.bold,
                                                   decoration: item.sudahKembali
                                                       ? TextDecoration
-                                                            .lineThrough
+                                                          .lineThrough
                                                       : null,
                                                 ),
                                               ),
@@ -590,7 +729,7 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
         ),
         child: Row(
           children: [
-            Icon(icon, color: color, size: 22),
+            Icon(icon, color: color, size: 20),
             const SizedBox(width: 8),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -598,7 +737,7 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
                 Text(
                   count,
                   style: const TextStyle(
-                    fontSize: 16,
+                    fontSize: 15,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
@@ -620,7 +759,7 @@ class _LogbookHomePageState extends State<LogbookHomePage> {
       label: Text(label),
       selected: isSelected,
       onSelected: (_) => setState(() => _selectedFilter = status),
-      selectedColor: const Color(0xFF0F766E).withOpacity(0.15),
+      selectedColor: const Color(0xFF0F766E).withValues(alpha: 0.15),
       labelStyle: TextStyle(
         fontSize: 12,
         fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,

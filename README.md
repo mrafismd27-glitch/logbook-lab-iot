@@ -79,8 +79,8 @@ flutter run
 
 - **Nama Kontrak:** `LogbookLabIoT`
 - **Network:** Sepolia Testnet (`Chain ID: 11155111`)
-- **Contract Address:** `0x...` _(Diisi setelah proses deploy selesai)_
-- **Link Etherscan:** `https://sepolia.etherscan.io/address/0x...` _(Diisi setelah verifikasi kontrak)_
+- **Contract Address:** `0x97AAeFc3ad7d4C6DC08f1E05C59A66D78aF98Dc8` 
+- **Link Etherscan:** `https://sepolia.etherscan.io/address/0x97AAeFc3ad7d4C6DC08f1E05C59A66D78aF98Dc8` 
 
 ---
 
